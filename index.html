@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nen Energy Grid</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0f14; color:#e8eef6; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 18px; display:grid; gap:14px; }
+    .row { display:grid; gap:12px; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 900px){ .row { grid-template-columns: 1fr; } }
+    .card { background:#111826; border:1px solid #1b2738; border-radius:14px; padding:14px; }
+    h1 { font-size: 18px; margin:0 0 8px; }
+    .sub { opacity:.8; font-size: 13px; margin:0 0 12px; line-height:1.35; }
+    textarea {
+      width:100%; min-height: 220px; resize: vertical;
+      background:#0c1320; color:#e8eef6; border:1px solid #1b2738; border-radius:12px;
+      padding:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+      outline: none;
+    }
+    button {
+      background:#1d4ed8; border:0; color:white; padding:10px 12px; border-radius:10px; cursor:pointer;
+      font-weight:600; letter-spacing:.2px;
+    }
+    button.secondary { background:#223047; }
+    button.danger { background:#b91c1c; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
+    .status { margin-top:10px; font-size: 14px; }
+    .pill { display:inline-block; padding:5px 10px; border-radius:999px; font-weight:700; }
+    .ok { background:#0f3d25; color:#b7f7d0; border:1px solid #1a6b3e; }
+    .bad { background:#3a1620; color:#ffb4c3; border:1px solid #7a2438; }
+    .muted { opacity:.75; }
+    canvas { width:100%; height:auto; display:block; background:#0c1320; border:1px solid #1b2738; border-radius:12px; }
+    .tiny { font-size:12px; opacity:.7; margin-top:8px; line-height:1.35; }
+    code { background:#0c1320; border:1px solid #1b2738; padding:2px 6px; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Nen Energy Grid</h1>
+      <p class="sub">
+        Paste a grid (JSON 2D array). The hunter can move <b>Right</b> or <b>Down</b>.
+        Rule: total energy must <b>strictly increase</b> at every move ⇒ each entered cell must be <b>&gt; 0</b>.
+        Click <b>Check & Play</b> to see the hunter “eat” cell energy while moving along a valid path.
+      </p>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h1>Grid Input</h1>
+        <textarea id="gridInput">[
+  [5, 3, 2, 1],
+  [4, 0, 2, 2],
+  [3, 2, 2, 2],
+  [1, 1, 1, 9]
+]</textarea>
+        <div class="btns">
+          <button id="runBtn">Check & Play</button>
+          <button class="secondary" id="randBtn">Random Grid</button>
+          <button class="danger" id="stopBtn" disabled>Stop</button>
+        </div>
+        <div class="status" id="statusLine"></div>
+        <div class="tiny">
+          Tip: cells <code>&le; 0</code> are blocked (they would not increase total energy).
+        </div>
+      </div>
+
+      <div class="card">
+        <h1>Game View</h1>
+        <canvas id="cv" width="820" height="540"></canvas>
+        <div class="status">
+          <span class="muted">Total Nen:</span> <b id="totalNen">0</b>
+          <span class="muted"> · Step:</span> <b id="stepIdx">0</b>/<b id="stepMax">0</b>
+          <span class="muted"> · Last cell:</span> <b id="lastCell">-</b>
+        </div>
+        <div class="tiny">
+          Path is highlighted. The hunter animates cell-by-cell.
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  const gridInput = $("gridInput");
+  const runBtn = $("runBtn");
+  const randBtn = $("randBtn");
+  const stopBtn = $("stopBtn");
+  const statusLine = $("statusLine");
+
+  const cv = $("cv");
+  const ctx = cv.getContext("2d");
+
+  const totalNenEl = $("totalNen");
+  const stepIdxEl = $("stepIdx");
+  const stepMaxEl = $("stepMax");
+  const lastCellEl = $("lastCell");
+
+  let timer = null;
+
+  function safeParseGrid(text) {
+    const g = JSON.parse(text);
+    if (!Array.isArray(g) || g.length === 0 || !g.every(Array.isArray)) throw new Error("Grid must be a 2D array.");
+    const n = g[0].length;
+    if (n === 0 || !g.every(r => r.length === n)) throw new Error("All rows must have the same length.");
+    // Convert numeric strings → numbers
+    const grid = g.map(r => r.map(v => (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) ? Number(v) : v));
+    // Validate numbers
+    for (let i=0;i<grid.length;i++){
+      for (let j=0;j<grid[0].length;j++){
+        if (typeof grid[i][j] !== "number" || !Number.isFinite(grid[i][j])) throw new Error(`Non-number at [${i}][${j}]`);
+      }
+    }
+    return grid;
+  }
+
+  function findPath(grid) {
+    const m = grid.length, n = grid[0].length;
+    const ok = (v) => v > 0; // strict-increase of total energy ⇒ entered cell must be > 0
+    if (!ok(grid[0][0]) || !ok(grid[m-1][n-1])) return null;
+
+    const dp = Array.from({length:m}, () => Array(n).fill(false));
+    const parent = Array.from({length:m}, () => Array(n).fill(null));
+
+    dp[0][0] = true;
+
+    for (let i=0;i<m;i++){
+      for (let j=0;j<n;j++){
+        if (i===0 && j===0) continue;
+        if (!ok(grid[i][j])) continue;
+
+        if (i>0 && dp[i-1][j]) { dp[i][j] = true; parent[i][j] = [i-1,j]; }
+        else if (j>0 && dp[i][j-1]) { dp[i][j] = true; parent[i][j] = [i,j-1]; }
+      }
+    }
+
+    if (!dp[m-1][n-1]) return null;
+
+    const path = [];
+    let cur = [m-1, n-1];
+    while (cur) {
+      path.push(cur);
+      const [i,j] = cur;
+      cur = parent[i][j];
+    }
+    path.reverse();
+    return path;
+  }
+
+  function stopAnim() {
+    if (timer) clearInterval(timer);
+    timer = null;
+    stopBtn.disabled = true;
+    runBtn.disabled = false;
+    randBtn.disabled = false;
+  }
+
+  function draw(grid, path, posIndex) {
+    const m = grid.length, n = grid[0].length;
+    const pad = 18;
+    const w = cv.width, h = cv.height;
+
+    const cellW = Math.floor((w - pad*2) / n);
+    const cellH = Math.floor((h - pad*2) / m);
+    const cell = Math.min(cellW, cellH);
+
+    const offX = Math.floor((w - cell*n) / 2);
+    const offY = Math.floor((h - cell*m) / 2);
+
+    const inPath = new Set((path||[]).map(([i,j]) => i + "," + j));
+
+    ctx.clearRect(0,0,w,h);
+
+    // Grid background
+    ctx.fillStyle = "#0c1320";
+    ctx.fillRect(0,0,w,h);
+
+    // Draw cells
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    for (let i=0;i<m;i++){
+      for (let j=0;j<n;j++){
+        const x = offX + j*cell;
+        const y = offY + i*cell;
+        const v = grid[i][j];
+
+        const blocked = v <= 0;
+        const isP = inPath.has(i+","+j);
+
+        // Cell fill
+        if (blocked) ctx.fillStyle = "#2a1520";
+        else if (isP) ctx.fillStyle = "#0f2a3a";
+        else ctx.fillStyle = "#101a2b";
+        ctx.fillRect(x+1,y+1,cell-2,cell-2);
+
+        // Border
+        ctx.strokeStyle = "#1b2738";
+        ctx.strokeRect(x+0.5,y+0.5,cell,cell);
+
+        // Numbers
+        ctx.fillStyle = blocked ? "#ffb4c3" : "#e8eef6";
+        ctx.font = `600 ${Math.max(12, Math.floor(cell*0.22))}px ui-monospace, Menlo, Consolas, monospace`;
+        ctx.fillText(String(v), x + cell/2, y + cell/2);
+      }
+    }
+
+    // Start/End markers
+    function mark(i,j,label){
+      const x = offX + j*cell, y = offY + i*cell;
+      ctx.fillStyle = "#ffffff";
+      ctx.globalAlpha = 0.9;
+      ctx.font = `700 ${Math.max(12, Math.floor(cell*0.18))}px system-ui, sans-serif`;
+      ctx.fillText(label, x + cell/2, y + cell*0.18);
+      ctx.globalAlpha = 1;
+    }
+    mark(0,0,"START");
+    mark(m-1,n-1,"BOSS");
+
+    // Draw path line
+    if (path && path.length>0) {
+      ctx.strokeStyle = "#60a5fa";
+      ctx.lineWidth = Math.max(2, Math.floor(cell*0.06));
+      ctx.beginPath();
+      for (let k=0;k<path.length;k++){
+        const [i,j] = path[k];
+        const cx = offX + j*cell + cell/2;
+        const cy = offY + i*cell + cell/2;
+        if (k===0) ctx.moveTo(cx,cy);
+        else ctx.lineTo(cx,cy);
+      }
+      ctx.stroke();
+    }
+
+    // Draw hunter
+    if (path && path.length>0) {
+      const idx = Math.min(posIndex, path.length-1);
+      const [hi,hj] = path[idx];
+      const hx = offX + hj*cell + cell/2;
+      const hy = offY + hi*cell + cell/2;
+
+      // Hunter body
+      ctx.fillStyle = "#fbbf24";
+      ctx.beginPath();
+      ctx.arc(hx, hy, Math.max(8, Math.floor(cell*0.18)), 0, Math.PI*2);
+      ctx.fill();
+
+      // Face
+      ctx.fillStyle = "#111826";
+      ctx.beginPath();
+      ctx.arc(hx - Math.floor(cell*0.05), hy - Math.floor(cell*0.03), Math.max(2, Math.floor(cell*0.03)), 0, Math.PI*2);
+      ctx.arc(hx + Math.floor(cell*0.05), hy - Math.floor(cell*0.03), Math.max(2, Math.floor(cell*0.03)), 0, Math.PI*2);
+      ctx.fill();
+
+      // Glow
+      ctx.strokeStyle = "#fde68a";
+      ctx.lineWidth = Math.max(2, Math.floor(cell*0.04));
+      ctx.beginPath();
+      ctx.arc(hx, hy, Math.max(10, Math.floor(cell*0.23)), 0, Math.PI*2);
+      ctx.stroke();
+    }
+  }
+
+  function setStatus(ok, msg) {
+    statusLine.innerHTML = ok
+      ? `<span class="pill ok">PATH FOUND</span> <span class="muted">${msg || ""}</span>`
+      : `<span class="pill bad">NO PATH</span> <span class="muted">${msg || ""}</span>`;
+  }
+
+  function animate(grid, path) {
+    stopAnim();
+    runBtn.disabled = true;
+    randBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    let total = grid[0][0];
+    let idx = 0;
+
+    totalNenEl.textContent = String(total);
+    stepIdxEl.textContent = "0";
+    stepMaxEl.textContent = String(Math.max(0, path.length-1));
+    lastCellEl.textContent = String(grid[0][0]);
+
+    draw(grid, path, idx);
+
+    timer = setInterval(() => {
+      idx++;
+      if (idx >= path.length) { stopAnim(); return; }
+
+      const [i,j] = path[idx];
+      const v = grid[i][j];
+      total += v;
+
+      totalNenEl.textContent = String(total);
+      stepIdxEl.textContent = String(idx);
+      lastCellEl.textContent = String(v);
+
+      draw(grid, path, idx);
+
+      if (idx === path.length-1) {
+        // brief pause then stop
+        setTimeout(() => stopAnim(), 450);
+      }
+    }, 420);
+  }
+
+  function run() {
+    stopAnim();
+    try {
+      const grid = safeParseGrid(gridInput.value);
+      const path = findPath(grid);
+
+      if (!path) {
+        setStatus(false, "Blocked by ≤ 0 cells (Nen can’t strictly increase).");
+        totalNenEl.textContent = "0";
+        stepIdxEl.textContent = "0";
+        stepMaxEl.textContent = "0";
+        lastCellEl.textContent = "-";
+        draw(grid, [], 0);
+        return;
+      }
+
+      setStatus(true, `Steps: ${path.length-1}`);
+      animate(grid, path);
+    } catch (e) {
+      setStatus(false, e.message || "Invalid input.");
+      ctx.clearRect(0,0,cv.width,cv.height);
+    }
+  }
+
+  function randomGrid() {
+    stopAnim();
+    const m = 6 + Math.floor(Math.random()*3);   // 6..8
+    const n = 8 + Math.floor(Math.random()*3);   // 8..10
+    const grid = Array.from({length:m}, () => Array.from({length:n}, () => {
+      // mostly positive, sometimes 0/negative to create obstacles
+      const r = Math.random();
+      if (r < 0.12) return 0;
+      if (r < 0.18) return -1 * (1 + Math.floor(Math.random()*3));
+      return 1 + Math.floor(Math.random()*9);
+    }));
+
+    // Ensure start/end are positive for meaningful demo
+    grid[0][0] = 1 + Math.floor(Math.random()*9);
+    grid[m-1][n-1] = 5 + Math.floor(Math.random()*9);
+
+    gridInput.value = JSON.stringify(grid, null, 2);
+    run();
+  }
+
+  runBtn.addEventListener("click", run);
+  randBtn.addEventListener("click", randomGrid);
+  stopBtn.addEventListener("click", stopAnim);
+
+  // Initial render
+  run();
+})();
+</script>
+</body>
+</html>
